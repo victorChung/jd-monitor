@@ -3,7 +3,7 @@ name: 京东图书降价监控
 on:
   schedule:
     # 每小时的第5分钟运行一次（避免整点高峰）
-    - cron: '5 * * * *'
+    - cron: '5 */2 * * *'
   workflow_dispatch: # 允许手动触发
 
 jobs:
