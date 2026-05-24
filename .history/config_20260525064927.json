@@ -1,0 +1,15 @@
+{
+  "threshold_ratio": 1.1,
+  "items": [
+    {
+      "skuId": "10075112082026",
+      "name": "《三体》全集（典藏版）"
+    },
+    {
+      "skuId": "100123456789",
+      "name": "深入理解计算机系统（第3版）"
+    }
+  ],
+  "html_output": "index.html",
+  "data_file": "prices.json"
+}
