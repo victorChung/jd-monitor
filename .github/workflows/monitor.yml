@@ -9,6 +9,8 @@ on:
 jobs:
   monitor:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write    # 关键：允许写入仓库（推送代码）
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -24,9 +26,9 @@ jobs:
       - name: 运行监控脚本
         run: python monitor.py
 
-      - name: 提交变更（如有新价格或 HTML）
+      - name: 提交变更
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: '自动更新价格报告'
+          commit_message: "自动更新价格报告"
           branch: main
-          file_pattern: 'index.html prices.json'
+          file_pattern: "index.html prices.json"
