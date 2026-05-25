@@ -14,51 +14,58 @@ HEADERS = {
     "Referer": "https://www.jd.com/",
 }
 
-def fetch_price(sku_id):
-    """从京东商品页面提取价格（多重策略）"""
+def fetch_price_api(sku_id):
+    """通过 p.3.cn 接口获取价格（适合 GitHub Actions）"""
+    url = f"https://p.3.cn/prices/mgets?skuIds=J_{sku_id}"
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=10)
+        data = resp.json()
+        if data and "p" in data[0]:
+            return float(data[0]["p"])
+    except Exception as e:
+        print(f"API 获取失败: {e}")
+    return None
+
+def fetch_price_page(sku_id):
+    """从商品页面解析价格（适合本地网络）"""
     url = f"https://item.jd.com/{sku_id}.html"
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
         resp.raise_for_status()
         html = resp.text
         
-        # 策略1：提取 window.__INITIAL_STATE__ 对象
-        match = re.search(r'window\.__INITIAL_STATE__\s*=\s*({.*?});', html, re.S)
+        # 尝试提取 window._pageData
+        match = re.search(r'window\._pageData\s*=\s*({.*?});', html, re.S)
         if match:
             data = json.loads(match.group(1))
-            # 常见价格路径
-            price = None
-            # 路径A: data.item.price.salePrice
-            if 'item' in data and 'price' in data['item'] and 'salePrice' in data['item']['price']:
-                price = data['item']['price']['salePrice']
-            # 路径B: data.skuInfo.price
-            elif 'skuInfo' in data and 'price' in data['skuInfo']:
-                price = data['skuInfo']['price']
-            # 路径C: data.priceInfo.price
-            elif 'priceInfo' in data and 'price' in data['priceInfo']:
-                price = data['priceInfo']['price']
+            # 探索常见价格路径
+            price = data.get("item", {}).get("price", {}).get("salePrice")
             if price:
                 return float(price)
         
-        # 策略2：搜索 data-price 属性
+        # 尝试提取 data-price 属性
         match = re.search(r'data-price="([\d.]+)"', html)
         if match:
             return float(match.group(1))
         
-        # 策略3：搜索 <span class="price J-prev-price"> 内容
-        match = re.search(r'<span[^>]*class="price[^"]*"[^>]*>([\d.]+)</span>', html)
-        if match:
-            return float(match.group(1))
-        
-        # 策略4：搜索 <div class="price"> 内容
-        match = re.search(r'<div[^>]*class="price"[^>]*>¥?([\d.]+)</div>', html)
+        # 尝试提取 <span class="price"> 内容
+        match = re.search(r'<span[^>]*class="price[^"]*"[^>]*>¥?([\d.]+)</span>', html)
         if match:
             return float(match.group(1))
             
     except Exception as e:
-        print(f"获取商品 {sku_id} 价格失败: {e}")
+        print(f"页面解析失败: {e}")
     return None
 
+def fetch_price(sku_id):
+    """组合获取：先 API，失败则页面解析"""
+    price = fetch_price_api(sku_id)
+    if price is not None:
+        return price
+    print(f"API 失败，尝试页面解析...")
+    return fetch_price_page(sku_id)
+
+# ---------- 以下函数与之前相同，保持不变 ----------
 def load_config():
     with open("config.json", "r", encoding="utf-8") as f:
         return json.load(f)
@@ -82,65 +89,18 @@ def generate_html(items_info, output_file, threshold_ratio):
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>京东自营图书降价监控</title>
         <style>
-            body {{
-                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                background-color: #f5f5f5;
-                margin: 0;
-                padding: 20px;
-            }}
-            .container {{
-                max-width: 1200px;
-                margin: 0 auto;
-                background: white;
-                border-radius: 12px;
-                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-                padding: 20px;
-            }}
-            h1 {{
-                color: #e4393c;
-                border-left: 5px solid #e4393c;
-                padding-left: 15px;
-                margin-top: 0;
-            }}
-            .update-time {{
-                color: #666;
-                font-size: 0.9em;
-                margin-bottom: 20px;
-            }}
-            table {{
-                width: 100%;
-                border-collapse: collapse;
-            }}
-            th, td {{
-                padding: 12px 15px;
-                text-align: left;
-                border-bottom: 1px solid #ddd;
-            }}
-            th {{
-                background-color: #f2f2f2;
-                font-weight: 600;
-            }}
-            tr:hover {{
-                background-color: #f9f9f9;
-            }}
-            .triggered {{
-                background-color: #ffe6e6 !important;
-                font-weight: bold;
-                color: #e4393c;
-            }}
-            .price-current {{
-                font-weight: bold;
-                color: #e4393c;
-            }}
-            .price-lowest {{
-                color: #2c7a2c;
-            }}
-            footer {{
-                margin-top: 30px;
-                text-align: center;
-                font-size: 0.8em;
-                color: #999;
-            }}
+            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f5f5f5; margin: 0; padding: 20px; }}
+            .container {{ max-width: 1200px; margin: 0 auto; background: white; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); padding: 20px; }}
+            h1 {{ color: #e4393c; border-left: 5px solid #e4393c; padding-left: 15px; }}
+            .update-time {{ color: #666; font-size: 0.9em; margin-bottom: 20px; }}
+            table {{ width: 100%; border-collapse: collapse; }}
+            th, td {{ padding: 12px 15px; text-align: left; border-bottom: 1px solid #ddd; }}
+            th {{ background-color: #f2f2f2; }}
+            tr:hover {{ background-color: #f9f9f9; }}
+            .triggered {{ background-color: #ffe6e6 !important; font-weight: bold; color: #e4393c; }}
+            .price-current {{ font-weight: bold; color: #e4393c; }}
+            .price-lowest {{ color: #2c7a2c; }}
+            footer {{ margin-top: 30px; text-align: center; font-size: 0.8em; color: #999; }}
         </style>
     </head>
     <body>
@@ -148,18 +108,8 @@ def generate_html(items_info, output_file, threshold_ratio):
             <h1>📚 京东自营图书降价监控</h1>
             <div class="update-time">最后更新：{update_time}</div>
             <table>
-                <thead>
-                    <tr>
-                        <th>商品名称</th>
-                        <th>当前价格 (¥)</th>
-                        <th>历史最低价 (¥)</th>
-                        <th>触发阈值 (¥)</th>
-                        <th>状态</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {rows}
-                </tbody>
+                <thead><tr><th>商品名称</th><th>当前价格 (¥)</th><th>历史最低价 (¥)</th><th>触发阈值 (¥)</th><th>状态</th></tr></thead>
+                <tbody>{rows}</tbody>
             </table>
             <footer>触发条件：当前价格 < 历史最低价 × {threshold_ratio}<br>数据自动更新，每小时一次</footer>
         </div>
@@ -167,11 +117,7 @@ def generate_html(items_info, output_file, threshold_ratio):
     </html>
     """
     if not items_info:
-        rows_html = """
-        <tr>
-            <td colspan="5" style="text-align:center; color:#999;">暂无商品数据，请检查网络或稍后重试</td>
-        </tr>
-        """
+        rows_html = "<tr><td colspan='5' style='text-align:center;'>暂无商品数据，请检查网络或稍后重试</td></tr>"
     else:
         rows_html = ""
         for item in items_info:
@@ -219,10 +165,7 @@ def main():
         history_low = price_data.get(sku_id, {}).get("history_low", current_price)
         if current_price < history_low:
             history_low = current_price
-            price_data[sku_id] = {
-                "history_low": history_low,
-                "last_update": datetime.now().isoformat()
-            }
+            price_data[sku_id] = {"history_low": history_low, "last_update": datetime.now().isoformat()}
             print(f"  🎉 新低！历史最低 ¥{history_low:.2f}")
         
         triggered = current_price < (history_low * threshold_ratio)
