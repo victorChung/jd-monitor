@@ -7,11 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from curl_cffi import requests
 
-# ========== 从环境变量读取 Cookie（GitHub Secrets） ==========
 COOKIE = os.environ.get("JD_COOKIE", "")
-if not COOKIE:
-    print("警告: 未设置 JD_COOKIE 环境变量，可能会被反爬拦截")
-
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
@@ -20,8 +16,7 @@ HEADERS = {
     "Cookie": COOKIE,
 }
 
-def fetch_price(sku_id):
-    """使用 curl_cffi 模拟浏览器获取商品页面并提取价格"""
+def fetch_price(sku_id, debug=False):
     url = f"https://item.jd.com/{sku_id}.html"
     try:
         resp = requests.get(url, headers=HEADERS, impersonate="chrome120", timeout=20)
@@ -30,18 +25,24 @@ def fetch_price(sku_id):
             return None
         html = resp.text
 
-        # 检查是否被重定向到首页或验证页面
+        # 调试：保存 HTML 片段
+        if debug:
+            with open(f"debug_{sku_id}.html", "w", encoding="utf-8") as f:
+                f.write(html[:10000])  # 只保存前 10000 字符，避免过大
+            print(f"已保存 HTML 片段到 debug_{sku_id}.html")
+
+        # 检查是否被重定向到首页
         if "京东(JD.COM)-正品低价" in html[:500]:
             print("可能被反爬，页面返回了京东首页")
             return None
 
-        # 多种正则匹配价格
+        # 尝试多种正则
         patterns = [
-            r'data-price="([\d.]+)"',                     # data-price 属性
-            r'<span[^>]*class="price[^"]*"[^>]*>¥?([\d.]+)</span>',  # 价格标签
-            r'"salePrice":([\d.]+)',                      # JSON 中的 salePrice
-            r'"price":"([\d.]+)"',                        # JSON 中的 price
-            r'¥([\d.]+)'                                  # 直接 ¥ 符号后的数字
+            r'data-price="([\d.]+)"',
+            r'<span[^>]*class="price[^"]*"[^>]*>¥?([\d.]+)</span>',
+            r'"salePrice":([\d.]+)',
+            r'"price":"([\d.]+)"',
+            r'¥([\d.]+)'
         ]
         for pattern in patterns:
             match = re.search(pattern, html)
@@ -60,13 +61,21 @@ def fetch_price(sku_id):
             if price:
                 return float(price)
 
+        # 尝试提取 window.__INITIAL_STATE__
+        match = re.search(r'window\.__INITIAL_STATE__\s*=\s*({.*?});', html, re.S)
+        if match and match.group(1) != 'null':
+            data = json.loads(match.group(1))
+            price = data.get("item", {}).get("price", {}).get("salePrice")
+            if price:
+                return float(price)
+
         print("未找到任何价格信息")
         return None
     except Exception as e:
         print(f"请求异常: {e}")
         return None
 
-# ========== 以下为通用函数（与之前相同） ==========
+# 以下函数与之前相同，但 main 中增加了调试模式：第一次失败后开启 debug 重试
 def load_config():
     with open("config.json", "r", encoding="utf-8") as f:
         return json.load(f)
@@ -108,7 +117,7 @@ def generate_html(items_info, output_file, threshold_ratio):
         <div class="container">
             <h1>📚 京东自营图书降价监控</h1>
             <div class="update-time">最后更新：{update_time}</div>
-            <table>
+            <tr>
                 <thead><tr><th>商品名称</th><th>当前价格 (¥)</th><th>历史最低价 (¥)</th><th>触发阈值 (¥)</th><th>状态</th></tr></thead>
                 <tbody>{rows}</tbody>
             </table>
@@ -118,7 +127,7 @@ def generate_html(items_info, output_file, threshold_ratio):
     </html>
     """
     if not items_info:
-        rows_html = "<tr><td colspan='5' style='text-align:center;'>暂无商品数据，请检查网络或稍后重试</td></tr>"
+        rows_html = "<tr><td colspan='5' style='text-align:center;'>暂无商品数据，请检查网络或稍后重试</td></td>"
     else:
         rows_html = ""
         for item in items_info:
@@ -157,7 +166,12 @@ def main():
         sku_id = str(item_cfg["skuId"])
         name = item_cfg.get("name", f"商品 {sku_id}")
         print(f"正在获取 {name} (sku {sku_id}) 的价格...")
-        current_price = fetch_price(sku_id)
+        # 第一次尝试，debug=False
+        current_price = fetch_price(sku_id, debug=False)
+        if current_price is None:
+            # 第二次尝试，开启 debug 保存 HTML
+            print("第一次失败，尝试开启调试模式...")
+            current_price = fetch_price(sku_id, debug=True)
         if current_price is None:
             print(f"  ❌ 获取失败")
             continue
