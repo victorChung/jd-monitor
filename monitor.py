@@ -2,70 +2,71 @@ import json
 import re
 import time
 import random
-import requests
+import os
 from datetime import datetime
 from pathlib import Path
+from curl_cffi import requests
+
+# ========== 从环境变量读取 Cookie（GitHub Secrets） ==========
+COOKIE = os.environ.get("JD_COOKIE", "")
+if not COOKIE:
+    print("警告: 未设置 JD_COOKIE 环境变量，可能会被反爬拦截")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
     "Accept-Language": "zh-CN,zh;q=0.9",
-    "Connection": "keep-alive",
     "Referer": "https://www.jd.com/",
+    "Cookie": COOKIE,
 }
 
-def fetch_price_api(sku_id):
-    """通过 p.3.cn 接口获取价格（适合 GitHub Actions）"""
-    url = f"https://p.3.cn/prices/mgets?skuIds=J_{sku_id}"
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=10)
-        data = resp.json()
-        if data and "p" in data[0]:
-            return float(data[0]["p"])
-    except Exception as e:
-        print(f"API 获取失败: {e}")
-    return None
-
-def fetch_price_page(sku_id):
-    """从商品页面解析价格（适合本地网络）"""
+def fetch_price(sku_id):
+    """使用 curl_cffi 模拟浏览器获取商品页面并提取价格"""
     url = f"https://item.jd.com/{sku_id}.html"
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=15)
-        resp.raise_for_status()
+        resp = requests.get(url, headers=HEADERS, impersonate="chrome120", timeout=20)
+        if resp.status_code != 200:
+            print(f"HTTP 状态码: {resp.status_code}")
+            return None
         html = resp.text
-        
+
+        # 检查是否被重定向到首页或验证页面
+        if "京东(JD.COM)-正品低价" in html[:500]:
+            print("可能被反爬，页面返回了京东首页")
+            return None
+
+        # 多种正则匹配价格
+        patterns = [
+            r'data-price="([\d.]+)"',                     # data-price 属性
+            r'<span[^>]*class="price[^"]*"[^>]*>¥?([\d.]+)</span>',  # 价格标签
+            r'"salePrice":([\d.]+)',                      # JSON 中的 salePrice
+            r'"price":"([\d.]+)"',                        # JSON 中的 price
+            r'¥([\d.]+)'                                  # 直接 ¥ 符号后的数字
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, html)
+            if match:
+                price_str = re.sub(r',', '', match.group(1))
+                try:
+                    return float(price_str)
+                except:
+                    continue
+
         # 尝试提取 window._pageData
         match = re.search(r'window\._pageData\s*=\s*({.*?});', html, re.S)
         if match:
             data = json.loads(match.group(1))
-            # 探索常见价格路径
             price = data.get("item", {}).get("price", {}).get("salePrice")
             if price:
                 return float(price)
-        
-        # 尝试提取 data-price 属性
-        match = re.search(r'data-price="([\d.]+)"', html)
-        if match:
-            return float(match.group(1))
-        
-        # 尝试提取 <span class="price"> 内容
-        match = re.search(r'<span[^>]*class="price[^"]*"[^>]*>¥?([\d.]+)</span>', html)
-        if match:
-            return float(match.group(1))
-            
+
+        print("未找到任何价格信息")
+        return None
     except Exception as e:
-        print(f"页面解析失败: {e}")
-    return None
+        print(f"请求异常: {e}")
+        return None
 
-def fetch_price(sku_id):
-    """组合获取：先 API，失败则页面解析"""
-    price = fetch_price_api(sku_id)
-    if price is not None:
-        return price
-    print(f"API 失败，尝试页面解析...")
-    return fetch_price_page(sku_id)
-
-# ---------- 以下函数与之前相同，保持不变 ----------
+# ========== 以下为通用函数（与之前相同） ==========
 def load_config():
     with open("config.json", "r", encoding="utf-8") as f:
         return json.load(f)
@@ -148,10 +149,10 @@ def main():
     items_config = config["items"]
     html_output = config["html_output"]
     data_file = config["data_file"]
-    
+
     price_data = load_price_data(data_file)
     items_info = []
-    
+
     for item_cfg in items_config:
         sku_id = str(item_cfg["skuId"])
         name = item_cfg.get("name", f"商品 {sku_id}")
@@ -161,13 +162,13 @@ def main():
             print(f"  ❌ 获取失败")
             continue
         print(f"  ✅ 当前价格: ¥{current_price:.2f}")
-        
+
         history_low = price_data.get(sku_id, {}).get("history_low", current_price)
         if current_price < history_low:
             history_low = current_price
             price_data[sku_id] = {"history_low": history_low, "last_update": datetime.now().isoformat()}
             print(f"  🎉 新低！历史最低 ¥{history_low:.2f}")
-        
+
         triggered = current_price < (history_low * threshold_ratio)
         items_info.append({
             "name": name,
@@ -178,7 +179,7 @@ def main():
             "triggered": triggered
         })
         time.sleep(random.uniform(1, 2))
-    
+
     save_price_data(price_data, data_file)
     generate_html(items_info, html_output, threshold_ratio)
     print("监控完成。")

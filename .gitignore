@@ -32,3 +32,5 @@ config.toml
 openspec
 public/cesium/*
 *Example*.html
+*Sample*.md
+index.html
