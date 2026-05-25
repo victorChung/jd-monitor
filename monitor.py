@@ -5,77 +5,78 @@ import random
 import os
 from datetime import datetime
 from pathlib import Path
-from curl_cffi import requests
+from playwright.sync_api import sync_playwright
 
+# 从环境变量读取 Cookie（GitHub Secrets）
 COOKIE = os.environ.get("JD_COOKIE", "")
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": "zh-CN,zh;q=0.9",
-    "Referer": "https://www.jd.com/",
-    "Cookie": COOKIE,
-}
 
-def fetch_price(sku_id, debug=False):
-    url = f"https://item.jd.com/{sku_id}.html"
-    try:
-        resp = requests.get(url, headers=HEADERS, impersonate="chrome120", timeout=20)
-        if resp.status_code != 200:
-            print(f"HTTP 状态码: {resp.status_code}")
-            return None
-        html = resp.text
-
-        # 调试：保存 HTML 片段
-        if debug:
-            with open(f"debug_{sku_id}.html", "w", encoding="utf-8") as f:
-                f.write(html[:10000])  # 只保存前 10000 字符，避免过大
-            print(f"已保存 HTML 片段到 debug_{sku_id}.html")
-
-        # 检查是否被重定向到首页
-        if "京东(JD.COM)-正品低价" in html[:500]:
-            print("可能被反爬，页面返回了京东首页")
-            return None
-
-        # 尝试多种正则
-        patterns = [
-            r'data-price="([\d.]+)"',
-            r'<span[^>]*class="price[^"]*"[^>]*>¥?([\d.]+)</span>',
-            r'"salePrice":([\d.]+)',
-            r'"price":"([\d.]+)"',
-            r'¥([\d.]+)'
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, html)
-            if match:
-                price_str = re.sub(r',', '', match.group(1))
+def fetch_price(sku_id):
+    """使用Playwright获取渲染后的商品价格"""
+    with sync_playwright() as p:
+        # 启动浏览器（无头模式）
+        browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
+        context = browser.new_context(
+            viewport={'width': 1920, 'height': 1080},
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        )
+        # 设置Cookie
+        if COOKIE:
+            # 解析Cookie字符串为字典列表
+            cookie_items = []
+            for item in COOKIE.split('; '):
+                if '=' in item:
+                    name, value = item.split('=', 1)
+                    cookie_items.append({'name': name, 'value': value, 'domain': '.jd.com', 'path': '/'})
+            context.add_cookies(cookie_items)
+        
+        page = context.new_page()
+        url = f"https://item.jd.com/{sku_id}.html"
+        try:
+            print(f"  正在访问 {url}")
+            page.goto(url, timeout=30000, wait_until='networkidle')
+            # 等待价格元素出现
+            selectors = ['.price', '.J-prev-price', '[data-price]', '.p-price', 'span.price']
+            price_element = None
+            for selector in selectors:
                 try:
-                    return float(price_str)
+                    price_element = page.wait_for_selector(selector, timeout=5000)
+                    if price_element:
+                        break
                 except:
                     continue
-
-        # 尝试提取 window._pageData
-        match = re.search(r'window\._pageData\s*=\s*({.*?});', html, re.S)
-        if match:
-            data = json.loads(match.group(1))
-            price = data.get("item", {}).get("price", {}).get("salePrice")
+            if price_element:
+                price_text = price_element.inner_text()
+                match = re.search(r'[\d.]+', price_text)
+                if match:
+                    price = float(match.group())
+                    browser.close()
+                    return price
+            # 如果没有找到，尝试从页面JS上下文中获取
+            price = page.evaluate('''
+                () => {
+                    const priceEl = document.querySelector('.price, .J-prev-price, [data-price], .p-price');
+                    if (priceEl) {
+                        let text = priceEl.innerText;
+                        let match = text.match(/[\\d.]+/);
+                        if (match) return parseFloat(match[0]);
+                    }
+                    // 尝试从window._pageData获取
+                    if (window._pageData && window._pageData.item && window._pageData.item.price) {
+                        return window._pageData.item.price.salePrice;
+                    }
+                    return null;
+                }
+            ''')
             if price:
+                browser.close()
                 return float(price)
-
-        # 尝试提取 window.__INITIAL_STATE__
-        match = re.search(r'window\.__INITIAL_STATE__\s*=\s*({.*?});', html, re.S)
-        if match and match.group(1) != 'null':
-            data = json.loads(match.group(1))
-            price = data.get("item", {}).get("price", {}).get("salePrice")
-            if price:
-                return float(price)
-
-        print("未找到任何价格信息")
-        return None
-    except Exception as e:
-        print(f"请求异常: {e}")
+        except Exception as e:
+            print(f"  Playwright 错误: {e}")
+        finally:
+            browser.close()
         return None
 
-# 以下函数与之前相同，但 main 中增加了调试模式：第一次失败后开启 debug 重试
+# ========== 以下为通用函数（与之前相同） ==========
 def load_config():
     with open("config.json", "r", encoding="utf-8") as f:
         return json.load(f)
@@ -127,7 +128,7 @@ def generate_html(items_info, output_file, threshold_ratio):
     </html>
     """
     if not items_info:
-        rows_html = "<tr><td colspan='5' style='text-align:center;'>暂无商品数据，请检查网络或稍后重试</td></td>"
+        rows_html = "<tr><td colspan='5' style='text-align:center;'>暂无商品数据，请检查网络或稍后重试</td></tr>"
     else:
         rows_html = ""
         for item in items_info:
@@ -166,12 +167,7 @@ def main():
         sku_id = str(item_cfg["skuId"])
         name = item_cfg.get("name", f"商品 {sku_id}")
         print(f"正在获取 {name} (sku {sku_id}) 的价格...")
-        # 第一次尝试，debug=False
-        current_price = fetch_price(sku_id, debug=False)
-        if current_price is None:
-            # 第二次尝试，开启 debug 保存 HTML
-            print("第一次失败，尝试开启调试模式...")
-            current_price = fetch_price(sku_id, debug=True)
+        current_price = fetch_price(sku_id)
         if current_price is None:
             print(f"  ❌ 获取失败")
             continue
